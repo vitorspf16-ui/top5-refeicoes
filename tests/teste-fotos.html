@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Testes do envio de fotos</title>
+<style>body{font:15px system-ui;margin:16px;background:#111;color:#eee}li{margin:6px 0}.ok{color:#6fdc8c}.falha{color:#ff7b80}code{color:#aaa}</style></head>
+<body><h1>Testes do envio de fotos</h1><p>Usa o <code>compress.js</code> e o <code>store-supabase.js</code> reais com um Supabase simulado. Nada é enviado nem gravado.</p>
+<p id="resumo">Executando…</p><ul id="lista"></ul>
+<script type="module">
+import { comprimir, conferir } from "../js/compress.js";
+import { criarStore } from "../js/store-supabase.js";
+import { IMG } from "../js/config.js";
+
+const toBlobOriginal = HTMLCanvasElement.prototype.toBlob;
+const restaurar = () => { HTMLCanvasElement.prototype.toBlob = toBlobOriginal; IMG.timeoutMs = 10000; };
+const trocar = fn => { const o = toBlobOriginal; HTMLCanvasElement.prototype.toBlob = function (cb, t, q) { fn(o.bind(this), cb, t, q); }; };
+const jpeg = (c, q = 0.95) => new Promise(r => toBlobOriginal.call(c, r, "image/jpeg", q));
+async function foto(w = 3000, h = 2000, ruido = false) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d");
+  const g = x.createLinearGradient(0, 0, w, h); g.addColorStop(0, "#c33"); g.addColorStop(1, "#fc6"); x.fillStyle = g; x.fillRect(0, 0, w, h);
+  if (ruido) { const d = x.createImageData(w, h); for (let i = 0; i < d.data.length; i++) d.data[i] = i % 4 === 3 ? 255 : Math.random() * 255; x.putImageData(d, 0, 0); }
+  else for (let i = 0; i < 80; i++) { x.fillStyle = `hsl(${i * 13 % 360},60%,50%)`; x.beginPath(); x.arc(Math.random() * w, Math.random() * h, 60 + Math.random() * 200, 0, 7); x.fill(); }
+  return jpeg(c);
+}
+const arq = (b, nome = "foto.jpg", tipo = "image/jpeg") => new File([b], nome, { type: tipo });
+function clienteFalso({ uploadErro = null, vinculo = [{ id: "x" }], votoErro = null } = {}) {
+  const log = { uploads: [], removes: [], vinculos: [] };
+  const cadeia = (res) => { const r = { eq: () => r, select: () => r, single: () => Promise.resolve(res()), then: (f, g) => Promise.resolve(res()).then(f, g) }; return r; };
+  return { log,
+    from: t => ({
+      insert: d => t === "votos" ? Promise.resolve({ error: votoErro }) : cadeia(() => ({ data: { id: "prato1" }, error: null })),
+      update: d => cadeia(() => d.foto_path !== undefined ? (log.vinculos.push(d.foto_path), { data: vinculo, error: null }) : { data: { foto_path: null }, error: null }),
+      select: () => cadeia(() => ({ data: { foto_path: null }, error: null })) }),
+    storage: { from: () => ({
+      upload: async (path, blob, opt) => { log.uploads.push({ path, blob, opt }); return uploadErro ? { error: uploadErro } : { data: { path }, error: null }; },
+      remove: async p => { log.removes.push(p); return { error: null }; },
+      getPublicUrl: p => ({ data: { publicUrl: "https://x/" + p } }) }) },
+    auth: { getSession: async () => ({ data: { session: { user: { id: "u1" } } } }) }, rpc: async () => ({ data: null, error: null }) };
+}
+const rejeita = async (p) => { try { await p; return null; } catch (e) { return e.message; } };
+const ext = t => ({ "image/webp": "webp", "image/jpeg": "jpg", "image/png": "png" }[t]);
+
+const casos = [
+ ["1. Navegador com WebP: gera WebP coerente (MIME, extensão, assinatura, ≤ limite)", async () => {
+   const r = await comprimir(arq(await foto())); const ok = await conferir(r.blob);
+   return [r.tipo === "image/webp" && r.ext === "webp" && ok && r.tamanhoFinal <= IMG.maxServidorBytes, `${r.tipo} ${fmtB(r.tamanhoFinal)} ${r.largura}x${r.altura}`]; }],
+ ["2. Navegador SEM suporte a WebP (devolve PNG ao pedir WebP): usa JPEG", async () => {
+   trocar((o, cb, t, q) => o(cb, t === "image/webp" ? "image/png" : t, q));
+   const r = await comprimir(arq(await foto())); return [r.tipo === "image/jpeg" && r.ext === "jpg" && await conferir(r.blob), `${r.tipo} ${fmtB(r.tamanhoFinal)}`]; }],
+ ["3a. Falha na conversão WebP (callback com null): usa JPEG", async () => {
+   trocar((o, cb, t, q) => t === "image/webp" ? cb(null) : o(cb, t, q));
+   const r = await comprimir(arq(await foto())); return [r.tipo === "image/jpeg", r.tipo]; }],
+ ["3b. toBlob lança exceção para WebP: usa JPEG", async () => {
+   trocar((o, cb, t, q) => { if (t === "image/webp") throw new Error("boom"); o(cb, t, q); });
+   const r = await comprimir(arq(await foto())); return [r.tipo === "image/jpeg", r.tipo]; }],
+ ["3c. toBlob de WebP nunca responde (travado): desiste por timeout e usa JPEG", async () => {
+   IMG.timeoutMs = 300; trocar((o, cb, t, q) => { if (t !== "image/webp") o(cb, t, q); });
+   const t0 = performance.now(); const r = await comprimir(arq(await foto())); return [r.tipo === "image/jpeg" && performance.now() - t0 < 5000, `${r.tipo} em ${Math.round(performance.now() - t0)} ms`]; }],
+ ["3d. Nenhum formato funciona: erro claro, sem travar", async () => {
+   trocar((o, cb) => cb(null)); const m = await rejeita(comprimir(arq(await foto(800, 600)))); return [/não conseguiu gerar/.test(m || ""), m]; }],
+ ["4a. Imagem difícil (ruído): reduz qualidade/dimensões e respeita o limite do servidor", async () => {
+   const alvo = IMG.alvoBytes; IMG.alvoBytes = 40 * 1024; // força a redução de qualidade/dimensões
+   let r; try { r = await comprimir(arq(await foto(3000, 2000, true))); } finally { IMG.alvoBytes = alvo; }
+   return [r.tamanhoFinal <= IMG.maxServidorBytes && r.tentativas > 1 && (r.largura < 800 || r.qualidade < 0.75), `${r.tipo} ${fmtB(r.tamanhoFinal)} ${r.largura}x${r.altura} q=${r.qualidade} tentativas=${r.tentativas}`]; }],
+ ["4b. Resultado sempre acima do limite: erro claro e número de tentativas limitado", async () => {
+   let n = 0; const cab = { "image/webp": [82, 73, 70, 70, 0, 0, 0, 0, 87, 69, 66, 80], "image/jpeg": [255, 216, 255, 224], "image/png": [137, 80, 78, 71] };
+   trocar((o, cb, t) => { n++; const b = new Uint8Array(IMG.maxServidorBytes + 5000); b.set(cab[t]); cb(new Blob([b], { type: t })); });
+   const m = await rejeita(comprimir(arq(await foto(1200, 800)))); return [/Não foi possível reduzir/.test(m || "") && n <= IMG.maxTentativas, `${n} tentativas (máx. ${IMG.maxTentativas}); ${m}`]; }],
+ ["4c. Arquivo com MIME declarado mas bytes inválidos é rejeitado e cai para o próximo formato", async () => {
+   trocar((o, cb, t, q) => t === "image/webp" ? cb(new Blob(["lixo lixo lixo"], { type: "image/webp" })) : o(cb, t, q));
+   const r = await comprimir(arq(await foto())); return [r.tipo === "image/jpeg", r.tipo]; }],
+ ["5a. HEIC que o navegador não abre: mensagem orientando JPEG; promessa rejeita (interface não trava)", async () => {
+   const m = await rejeita(comprimir(arq(new Blob([new Uint8Array(2000)]), "IMG_1.HEIC", "image/heic"))); return [/HEIC/.test(m || "") && /JPEG/.test(m), m]; }],
+ ["5b. Formato incompatível (PDF) é recusado com mensagem", async () => {
+   const m = await rejeita(comprimir(arq(new Blob(["x"]), "a.pdf", "application/pdf"))); return [/Formato não reconhecido/.test(m || ""), m]; }],
+ ["5c. Arquivo grande demais (>15 MB) é recusado", async () => {
+   const m = await rejeita(comprimir(arq(new Blob([new Uint8Array(IMG.maxOriginalBytes + 1)])))); return [/muito grande/.test(m || ""), m]; }],
+ ["6a. Falha de conexão no upload: mensagem clara e nenhum vínculo gravado", async () => {
+   const f = clienteFalso({ uploadErro: { message: "Failed to fetch" } }); const s = await criarStore(f);
+   const r = await comprimir(arq(await foto(800, 600))); const m = await rejeita(s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: r.blob }));
+   return [/Sem conexão/.test(m || "") && f.log.vinculos.length === 0, m]; }],
+ ["6b. Servidor recusa o formato (415): mensagem aponta a migração 02", async () => {
+   const f = clienteFalso({ uploadErro: { message: "mime type image/jpeg is not supported", statusCode: "415" } }); const s = await criarStore(f);
+   const r = await comprimir(arq(await foto(800, 600))); const m = await rejeita(s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: r.blob })); return [/migração 02/.test(m || ""), m]; }],
+ ["6c. Upload ok, mas vínculo afetou 0 linhas (sem permissão): erro, sem sucesso falso, arquivo removido", async () => {
+   const f = clienteFalso({ vinculo: [] }); const s = await criarStore(f);
+   const r = await comprimir(arq(await foto(800, 600))); const m = await rejeita(s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: r.blob }));
+   return [!!m && f.log.removes.length === 1, m]; }],
+ ["7. Envio válido (simulando celular): extensão e contentType iguais ao arquivo real; foto vinculada", async () => {
+   const f = clienteFalso(); const s = await criarStore(f); const r = await comprimir(arq(await foto(4000, 3000)));
+   const m = await rejeita(s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: r.blob })); const u = f.log.uploads[0];
+   return [m === null && u.opt.contentType === r.blob.type && u.path.endsWith("." + ext(r.blob.type)) && f.log.vinculos[0] === u.path, `${u && u.path.replace(/[0-9a-f-]{36}/, "<uuid>")} ${u && u.opt.contentType}`]; }],
+ ["7b. Envio válido com navegador sem WebP: sobe .jpg com image/jpeg", async () => {
+   trocar((o, cb, t, q) => o(cb, t === "image/webp" ? "image/png" : t, q)); const f = clienteFalso(); const s = await criarStore(f); const r = await comprimir(arq(await foto()));
+   await s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: r.blob }); const u = f.log.uploads[0]; return [u.path.endsWith(".jpg") && u.opt.contentType === "image/jpeg", u.path.slice(-12)]; }],
+ ["7c. Blob com tipo incoerente não é enviado", async () => {
+   const f = clienteFalso(); const s = await criarStore(f); const m = await rejeita(s.salvarPrato({ participanteId: "p", nome: "x", descricao: null, blob: new Blob(["lixo"], { type: "image/jpeg" }) }));
+   return [!!m && f.log.uploads.length === 0, m]; }],
+ ["9a. Função gerenciar-admins responde 403: a mensagem do servidor chega ao usuário (não “non-2xx”)", async () => {
+   const f = clienteFalso(); f.functions = { invoke: async () => ({ data: null, error: { name: "FunctionsHttpError", message: "Edge Function returned a non-2xx status code", context: new Response(JSON.stringify({ error: "Apenas o administrador master pode fazer isso." }), { status: 403 }) } }) };
+   const s = await criarStore(f); const m = await rejeita(s.gerenciarAdmin("criar", { nome: "a", email: "a@b.co", senha: "12345678" })); return [m === "Apenas o administrador master pode fazer isso.", m]; }],
+ ["9b. Nova votação negada pelo servidor: mensagem clara", async () => {
+   const f = clienteFalso(); f.rpc = async () => ({ data: null, error: { message: "Apenas o administrador master." } });
+   const s = await criarStore(f); const m = await rejeita(s.iniciarNovaVotacao("2099-01-01T10:00")); return [/Somente o administrador master/.test(m || ""), m]; }],
+ ["9c. Nova votação: envia só o prazo (nenhum papel/identidade vem do navegador) e devolve a contagem", async () => {
+   const f = clienteFalso(); let args; f.rpc = async (n, a) => { args = [n, a]; return { data: { votos_apagados: 7 }, error: null }; };
+   const s = await criarStore(f); const r = await s.iniciarNovaVotacao("2099-01-01T10:00"); return [args[0] === "iniciar_nova_votacao" && Object.keys(args[1]).join() === "p_local" && r.votos_apagados === 7, JSON.stringify(args)]; }],
+ ["8. Votação encerrada: o servidor recusa o voto (simulado) e o site mostra “Votação encerrada.”  (o bloqueio real no banco: supabase/testes/votacao-encerrada.sql)", async () => {
+   const s = await criarStore(clienteFalso({ votoErro: { code: "P0001", message: "VOTACAO_ENCERRADA" } })); const r = await s.votar("p1"); return [r.ok === false && r.motivo === "Votação encerrada.", r.motivo]; }],
+];
+const fmtB = b => (b / 1024).toFixed(0) + " KB";
+const ul = document.getElementById("lista"); const resultados = [];
+for (const [nome, fn] of casos) {
+  let ok = false, det = "";
+  try { [ok, det] = await fn(); } catch (e) { det = "EXCEÇÃO: " + e.message; } finally { restaurar(); }
+  resultados.push({ nome, ok, det }); const li = document.createElement("li"); li.className = ok ? "ok" : "falha";
+  li.textContent = (ok ? "✓ " : "✗ ") + nome + " — " + det; ul.append(li);
+}
+const n = resultados.filter(r => r.ok).length;
+document.getElementById("resumo").textContent = `${n} de ${resultados.length} testes passaram.`; window.__resultados = resultados; window.__fim = true;
+</script></body></html>

@@ -16,7 +16,7 @@
   </div>
   <header>
     <h1>Top 5 do Grupo de Refeições</h1>
-    <p class="sub">Vote no prato que merece o avental</p>
+    <p class="sub">Quem vencer ganha o Pix para mudar de vida</p>
     <p class="aviso" id="aviso" role="status"></p>
   </header>
   <main class="layout">
@@ -33,7 +33,7 @@
   </main>
 
   <div id="admin" hidden>
-    <section class="panel admin" aria-labelledby="t-prazo">
+    <section class="panel admin" data-so-master hidden aria-labelledby="t-prazo">
       <h2 id="t-prazo">Prazo da votação</h2>
       <form class="form" id="f-prazo">
         <label>Encerra em (horário de Brasília) <input id="p-data" type="datetime-local" required></label>
@@ -59,9 +59,26 @@
         <label>Participante <select id="f-part"></select></label>
         <label>Nome do prato <input id="f-nome" maxlength="80" required></label>
         <label>Descrição (opcional) <textarea id="f-desc" maxlength="200" rows="2"></textarea></label>
-        <label>Foto da galeria (JPG, PNG, WebP ou HEIC/HEIF) <input id="f-file" type="file" accept="image/*,.heic,.heif"></label>
-        <label class="so-celular">Ou tirar uma foto agora <input id="f-cam" type="file" accept="image/*" capture="environment"></label>
-        <div class="prev" id="prev" hidden><img id="prev-img" alt="Prévia da foto compactada"><p id="prev-info"></p></div>
+        <div class="campo">
+          <span class="rotulo" id="lbl-foto">Foto do prato</span>
+          <div class="drop" id="drop" role="group" aria-labelledby="lbl-foto">
+            <div class="drop-vazio" id="drop-vazio">
+              <svg class="drop-ico" viewBox="0 0 24 24" width="40" height="40" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l1.6-2.4h6.8L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.6"/></svg>
+              <p class="drop-t">Adicione uma foto do prato</p>
+              <p class="drop-s">JPG, PNG, WebP ou HEIC · até 15 MB · é compactada para no máximo 300 KB antes do envio</p>
+              <div class="acoes centro"><label class="tool btn-arq" for="f-file">Escolher da galeria</label><label class="tool btn-arq so-celular" for="f-cam">Tirar foto</label></div>
+              <p class="drop-s so-desktop">ou arraste a imagem até aqui</p>
+            </div>
+            <div class="prev" id="prev" hidden>
+              <div class="prev-img"><img id="prev-img" alt="Prévia da foto do prato"></div>
+              <p class="prev-info" id="prev-info"></p>
+              <div class="acoes centro"><label class="tool btn-arq" for="f-file">Trocar foto</label><button class="tool" id="f-remover-prev" type="button" hidden>Remover seleção</button></div>
+            </div>
+            <span class="girando" aria-hidden="true"></span>
+          </div>
+          <input class="oculto" id="f-file" type="file" accept="image/*,.heic,.heif">
+          <input class="oculto" id="f-cam" type="file" accept="image/*" capture="environment">
+        </div>
         <p class="msg" id="f-msg" role="status" aria-live="polite"></p>
         <div class="acoes">
           <button class="vote" id="f-salvar" type="submit">Confirmar e salvar</button>
@@ -70,7 +87,7 @@
       </form>
       <ul class="pratos" id="lista-pratos"></ul>
     </section>
-    <section class="panel admin" id="sec-admins" aria-labelledby="t-admins" hidden>
+    <section class="panel admin" id="sec-admins" data-so-master hidden aria-labelledby="t-admins">
       <h2 id="t-admins">Gerenciar administradores</h2>
       <p class="note" id="admins-note">Área exclusiva do administrador master.</p>
       <form class="form" id="f-admin">
@@ -81,10 +98,27 @@
         <div class="acoes"><button class="vote" type="submit">Criar administrador</button></div>
       </form>
       <ul class="pratos" id="lista-admins"></ul>
-      <p class="note">A criação e exclusão de contas usa uma Edge Function protegida. Configure-a seguindo o README antes de usar este painel.</p>
+      <p class="note">Criar e remover administradores usa uma Edge Function protegida (veja o README). Remover o acesso mantém a conta de login, apenas sem permissão administrativa.</p>
+    </section>
+    <section class="panel admin" id="sec-master" data-so-master hidden aria-labelledby="t-nova">
+      <h2 id="t-nova">Nova votação</h2>
+      <p class="note">Apaga todos os votos atuais e abre uma nova votação com novo prazo. Participantes, pratos, fotos e contas são preservados.</p>
+      <p class="msg" id="nv-msg" role="status" aria-live="polite"></p>
+      <div class="acoes"><button class="vote perigo-b" id="btn-nova" type="button">Encerrar e iniciar nova votação</button></div>
     </section>
   </div>
 </div>
+
+<dialog id="dlg-nova">
+  <form class="form" id="f-nova">
+    <h2>Iniciar nova votação</h2>
+    <p class="alerta">Tem certeza de que deseja iniciar uma nova votação? Os votos atuais serão apagados permanentemente. Os participantes, os pratos cadastrados e as contas serão preservados.</p>
+    <label>Novo prazo de encerramento (horário de Brasília) <input id="nv-data" type="datetime-local" required></label>
+    <label class="check"><input id="nv-ok" type="checkbox"> Entendo que os votos atuais serão apagados</label>
+    <p class="msg" id="nv-dlg-msg" role="status" aria-live="polite"></p>
+    <div class="acoes"><button class="vote perigo-b" id="nv-go" type="submit">Apagar votos e iniciar</button><button class="tool" id="nv-cancel" type="button">Cancelar</button></div>
+  </form>
+</dialog>
 
 <dialog id="dlg-login">
   <form class="form" id="f-login">

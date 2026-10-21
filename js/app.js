@@ -5,10 +5,10 @@ const $ = id => document.getElementById(id);
 const texto = e => (e && e.message) || String(e);
 const iniciais = n => n.split(" ").slice(0, 2).map(s => s[0]).join("");
 const pct = n => n.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
-let store, lista = [], meu = null, admin = false, compactado = null, urlPrevia = null, ocupado = false, ultimos = {};
+let store, lista = [], meu = null, admin = false, master = false, adminsCarregados = false, compactado = null, urlPrevia = null, ocupado = false, ultimos = {};
 const linhas = new Map();
 const TZ = "America/Sao_Paulo";
-let cfg = { offset: 0, encerraEm: null }, jaEncerrada = false, prazoMostrado;
+let cfg = { offset: 0, encerraEm: null, ok: false }, jaEncerrada = false, prazoMostrado;
 const agora = () => Date.now() + cfg.offset;
 const encerrada = () => cfg.encerraEm !== null && agora() >= cfg.encerraEm;
 const fmtData = ms => new Date(ms).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "long", timeStyle: "short" });
@@ -17,6 +17,7 @@ const resta = ms => { const s = Math.max(0, Math.floor(ms / 1000)), d = Math.flo
   return d ? `${d}d ${h}h ${m}min` : h ? `${h}h ${m}min ${s % 60}s` : `${m}min ${s % 60}s`; };
 function aviso() {
   const a = $("aviso"), e = encerrada(); a.classList.toggle("fechada", e);
+  if (!cfg.ok) { a.textContent = "Carregando…"; return; }
   a.textContent = e ? `Votação encerrada em ${fmtData(cfg.encerraEm)} (Brasília). Resultado final abaixo.`
     : cfg.encerraEm ? `Votação aberta até ${fmtData(cfg.encerraEm)} (Brasília) · faltam ${resta(cfg.encerraEm - agora())}` : "Votação aberta";
   if (e !== jaEncerrada) { jaEncerrada = e; cartoes(); ranking(); }
@@ -117,35 +118,47 @@ function ranking() {
 async function votar(p) {
   if (encerrada()) { aviso(); $("status").textContent = "Votação encerrada."; return; }
   $("status").textContent = "Registrando voto…";
-  const r = await store.votar(p.id);
+  let r;
+  try { r = await store.votar(p.id); } catch (e) { r = { ok: false, motivo: "Não foi possível registrar o voto: " + texto(e) }; }
   await desenhar();
   $("status").textContent = r.ok ? `Voto registrado em ${p.apelido}!` : r.motivo;
 }
 
 /* ---------- Administração de pratos ---------- */
-function msg(t, erro) { const m = $("f-msg"); m.textContent = t; m.className = "msg" + (erro ? " erro" : ""); }
+function msg(t, erro, ok) { const m = $("f-msg"); m.textContent = t; m.className = "msg" + (erro ? " erro" : ok ? " sucesso" : ""); }
+const estadoFoto = e => { $("drop").dataset.estado = e || ""; };
+function mostrarPrevia(src, info) {
+  $("prev").hidden = !src; $("drop-vazio").hidden = !!src;
+  if (src) { $("prev-img").src = src; $("prev-info").textContent = info || ""; } else { $("prev-img").removeAttribute("src"); $("prev-info").textContent = ""; }
+  $("f-remover-prev").hidden = !compactado;
+}
+function mostrarAtual() { // foto já salva do prato selecionado (será mantida se nenhuma nova for escolhida)
+  const p = lista.find(x => x.id === $("f-part").value);
+  if (!compactado && p && p.prato && p.prato.fotoUrl) mostrarPrevia(p.prato.fotoUrl, "Foto atual. Escolha outra para substituí-la.");
+}
 function setOcupado(v, rotulo) {
-  ocupado = v; $("f-salvar").disabled = v; $("f-file").disabled = v; $("f-cam").disabled = v;
-  $("f-salvar").textContent = v ? rotulo : "Confirmar e salvar";
+  ocupado = v; $("f-salvar").disabled = v; $("f-file").disabled = v; $("f-cam").disabled = v; $("f-remover-prev").disabled = v;
+  $("drop").classList.toggle("ocupado", v); $("f-salvar").textContent = v ? rotulo : "Confirmar e salvar";
 }
 function limparFoto() {
   if (urlPrevia) URL.revokeObjectURL(urlPrevia);
-  urlPrevia = null; compactado = null; $("prev").hidden = true; $("prev-img").removeAttribute("src"); $("f-file").value = ""; $("f-cam").value = "";
+  urlPrevia = null; compactado = null; $("f-file").value = ""; $("f-cam").value = ""; estadoFoto(""); mostrarPrevia(null);
 }
 function carregar() {
   const p = lista.find(x => x.id === $("f-part").value);
   $("f-nome").value = p && p.prato ? p.prato.nome : ""; $("f-desc").value = (p && p.prato && p.prato.descricao) || "";
-  limparFoto();
+  limparFoto(); mostrarAtual();
 }
 function btn(t, fn, cls = "") { const b = document.createElement("button"); b.type = "button"; b.className = "tool " + cls; b.textContent = t; b.onclick = fn; return b; }
 async function agir(fn, ok, pergunta) {
   if (!confirm(pergunta)) return;
   msg("Processando…");
-  try { await fn(); msg(ok); carregar(); } catch (e) { msg(texto(e), true); }
+  try { await fn(); msg(ok, false, true); carregar(); } catch (e) { msg(texto(e), true); }
   await desenhar();
 }
-function painelAdmin() {
+function painelAdmin() { // síncrona: não devolve Promise
   $("admin").hidden = !admin; $("btn-admin").hidden = admin; $("btn-sair").hidden = !admin;
+  document.querySelectorAll("[data-so-master]").forEach(el => { el.hidden = !master; });
   if (!admin) return;
   const sel = $("f-part"), atual = sel.value, atv = lista.filter(p => p.ativo), sig = atv.map(p => p.id + p.nome + p.apelido).join("|");
   if (sel.dataset.sig !== sig) {
@@ -154,6 +167,7 @@ function painelAdmin() {
   }
   listaPessoas();
   if (prazoMostrado !== cfg.encerraEm) { prazoMostrado = cfg.encerraEm; $("p-data").value = cfg.encerraEm ? paraInput(cfg.encerraEm) : ""; }
+  if (master && !adminsCarregados) { adminsCarregados = true; atualizarListaAdmins(); } // trata os próprios erros
   const ul = $("lista-pratos"); ul.replaceChildren();
   const com = lista.filter(p => p.ativo && p.prato);
   if (!com.length) { const li = document.createElement("li"); li.textContent = "Nenhum prato cadastrado ainda."; ul.append(li); }
@@ -172,33 +186,40 @@ function painelAdmin() {
 
 $("f-part").onchange = carregar;
 $("f-limpar").onclick = () => { carregar(); msg(""); };
-const escolher = async e => {
-  const file = e.target.files[0]; if (!file) return;
-  limparFoto(); setOcupado(true, "Compactando…"); msg("Compactando imagem…");
+async function processar(file) { // seleção (galeria, câmera ou arrastar e soltar) → conversão → prévia
+  if (!file || ocupado) return;
+  limparFoto(); setOcupado(true, "Compactando…"); estadoFoto("carregando"); msg("Compactando imagem…");
   try {
     const r = await comprimir(file); // o arquivo original não é guardado nem enviado
     compactado = r; urlPrevia = URL.createObjectURL(r.blob);
-    $("prev-img").src = urlPrevia; $("prev").hidden = false;
     const d = Math.round((1 - r.tamanhoFinal / r.tamanhoOriginal) * 100);
-    const detalheQualidade = r.qualidade == null ? "PNG (sem ajuste de qualidade)" : `${r.rotulo}, qualidade ${r.qualidade}`;
-    $("prev-info").textContent = `Original: ${fmt(r.tamanhoOriginal)} → compactada: ${fmt(r.tamanhoFinal)} (${d >= 0 ? "−" + d : "+" + -d}%) · ${r.largura}×${r.altura} px · ${detalheQualidade}` +
-      (r.acimaDoAlvo ? " · ⚠ acima de 150 KB; o servidor aceita até 300 KB" : "");
-    msg("Confira a prévia e confirme para enviar.");
-  } catch (err) { msg(texto(err), true); }
+    mostrarPrevia(urlPrevia, `Original ${fmt(r.tamanhoOriginal)} → ${fmt(r.tamanhoFinal)} (${d >= 0 ? "−" + d : "+" + -d}%) · ${r.largura}×${r.altura} px · ${r.rotulo}, qualidade ${r.qualidade}` +
+      (r.acimaDoAlvo ? " · ⚠ acima de 150 KB; o servidor aceita até 300 KB" : ""));
+    estadoFoto("ok"); msg("Foto pronta. Confira a prévia e confirme para enviar.", false, true);
+  } catch (err) { limparFoto(); mostrarAtual(); estadoFoto("erro"); msg(texto(err), true); } // limpa para poder escolher o mesmo arquivo de novo
   finally { setOcupado(false); }
-};
-$("f-file").onchange = escolher; $("f-cam").onchange = escolher;
+}
+$("f-file").onchange = e => processar(e.target.files[0]); $("f-cam").onchange = e => processar(e.target.files[0]);
+$("f-remover-prev").onclick = () => { limparFoto(); mostrarAtual(); msg(""); };
+const zona = $("drop"); // arrastar e soltar (computador); a seleção por botão continua sendo a forma principal
+["dragenter", "dragover"].forEach(t => zona.addEventListener(t, e => { e.preventDefault(); zona.classList.add("sobre"); }));
+["dragleave", "drop"].forEach(t => zona.addEventListener(t, e => { e.preventDefault(); zona.classList.remove("sobre"); }));
+zona.addEventListener("drop", e => processar(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]));
 $("f-prato").onsubmit = async e => {
   e.preventDefault(); if (ocupado) return;
   const part = lista.find(p => p.id === $("f-part").value), prato = part && part.prato, nome = $("f-nome").value.trim();
-  if (!nome) return msg("Informe o nome do prato.", true);
+  if (!part) return msg("Escolha um participante.", true);
+  if (!nome) { $("f-nome").focus(); return msg("Informe o nome do prato.", true); }
   if (!prato && !compactado) return msg("Escolha uma foto para o novo prato.", true);
-  setOcupado(true, "Enviando…"); msg("Enviando…");
+  setOcupado(true, "Enviando…"); estadoFoto(compactado ? "carregando" : ""); msg("Enviando…");
+  let salvou = false;
   try {
-    await store.salvarPrato({ pratoId: prato && prato.id, participanteId: part.id, nome, descricao: $("f-desc").value.trim() || null, blob: compactado && compactado.blob });
-    limparFoto(); msg("Prato salvo!");
-  } catch (err) { msg(texto(err), true); }
-  finally { setOcupado(false); await desenhar(); }
+    await Promise.race([
+      store.salvarPrato({ pratoId: prato && prato.id, participanteId: part.id, nome, descricao: $("f-desc").value.trim() || null, blob: compactado && compactado.blob }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("O envio demorou demais. Verifique a conexão e tente de novo (confira antes se a foto já aparece na lista).")), 90000))]);
+    salvou = true; limparFoto(); msg("Prato salvo!", false, true);
+  } catch (err) { estadoFoto("erro"); msg(texto(err), true); }
+  finally { setOcupado(false); await desenhar(); if (salvou) mostrarAtual(); }
 };
 
 async function atualizarListaAdmins() {
@@ -213,23 +234,24 @@ async function atualizarListaAdmins() {
       const sub = document.createElement("div"); sub.className = "nick"; sub.textContent = `${a.email} · ${a.role === "master" ? "Master" : "Administrador"}`;
       t.append(b, sub); li.append(t);
       if (a.role !== "master") li.append(btn("Remover acesso", async () => {
-        if (!confirm(`Remover a permissão de administrador de ${a.email}? A conta de login também será excluída.`)) return;
-        try { await store.gerenciarAdmin("remover", { user_id: a.user_id }); aviso2("ad-msg", "Acesso removido e conta excluída."); await atualizarListaAdmins(); }
+        if (!confirm(`Remover a permissão de administrador de ${a.email}? A conta de login será mantida, apenas sem acesso administrativo.`)) return;
+        try { await store.gerenciarAdmin("remover", { user_id: a.user_id }); aviso2("ad-msg", "Acesso de administrador removido. A conta de login foi mantida.", false, true); await atualizarListaAdmins(); }
         catch (e) { aviso2("ad-msg", texto(e), true); }
       }, "perigo"));
       ul.append(li);
     });
-  } catch (e) { aviso2("ad-msg", "Não foi possível listar administradores: " + texto(e), true); }
+  } catch (e) { adminsCarregados = false; aviso2("ad-msg", "Não foi possível listar administradores: " + texto(e), true); }
 }
 $("f-admin").onsubmit = async e => {
   e.preventDefault();
   if (!master) return aviso2("ad-msg", "Apenas o administrador master pode fazer isso.", true);
   const nome = $("ad-nome").value.trim(), email = $("ad-email").value.trim(), senha = $("ad-senha").value;
+  if (senha.length < 8) return aviso2("ad-msg", "Use uma senha com pelo menos 8 caracteres.", true);
   aviso2("ad-msg", "Criando conta…");
   try {
     await store.gerenciarAdmin("criar", { nome, email, senha });
     $("ad-nome").value = ""; $("ad-email").value = ""; $("ad-senha").value = "";
-    aviso2("ad-msg", "Administrador criado. Ele poderá redefinir a senha pela tela de login.");
+    aviso2("ad-msg", "Administrador criado. Ele poderá redefinir a senha pela tela de login.", false, true);
     await atualizarListaAdmins();
   } catch (e) { aviso2("ad-msg", texto(e), true); }
 };
@@ -243,6 +265,7 @@ $("f-nova-senha").onsubmit = async e => {
     $("nova-senha").value = "";
     $("nova-senha-msg").textContent = "Senha alterada. Você já pode entrar com a nova senha.";
     history.replaceState({}, document.title, location.pathname + location.search);
+    await papeis(); desenhar();
     setTimeout(() => $("dlg-nova-senha").close(), 1600);
   } catch (err) { $("nova-senha-msg").textContent = "Não foi possível alterar a senha: " + texto(err); }
 };
@@ -260,14 +283,23 @@ $("btn-admin").onclick = () => {
 $("l-cancel").onclick = () => $("dlg-login").close();
 $("f-login").onsubmit = async e => {
   e.preventDefault(); $("login-msg").textContent = "Entrando…";
-  try { await store.entrar($("l-email").value.trim(), $("l-senha").value); admin = true; $("l-senha").value = ""; $("dlg-login").close(); await desenhar(); }
+  try { await store.entrar($("l-email").value.trim(), $("l-senha").value); $("l-senha").value = ""; await papeis(); $("dlg-login").close(); await desenhar(); }
   catch (err) { $("login-msg").textContent = texto(err); }
 };
-$("btn-sair").onclick = async () => { await store.sair(); admin = false; await desenhar(); };
+$("btn-sair").onclick = async () => {
+  try { await store.sair(); } catch (e) { console.error("Falha ao sair:", e); }
+  admin = false; master = false; adminsCarregados = false; await desenhar();
+};
+async function papeis() { // o papel vem do servidor (RPCs sou_admin / sou_admin_master); o e-mail nunca é usado para autorizar
+  try { admin = await store.ehAdmin(); master = admin ? await store.ehMaster() : false; }
+  catch (e) { console.error("Não foi possível verificar as permissões:", e); admin = false; master = false; }
+  if (!master) adminsCarregados = false;
+}
+const abrirNovaSenha = () => { const d = $("dlg-nova-senha"); if (!d.open) d.showModal(); };
 
 /* ---------- Administração: participantes e prazo ---------- */
 let editando = null;
-const aviso2 = (id, t, erro) => { const m = $(id); m.textContent = t; m.className = "msg" + (erro ? " erro" : ""); };
+const aviso2 = (id, t, erro, ok) => { const m = $(id); m.textContent = t; m.className = "msg" + (erro ? " erro" : ok ? " sucesso" : ""); };
 function limparPessoa() { editando = null; $("pe-nome").value = ""; $("pe-apelido").value = ""; $("pe-salvar").textContent = "Cadastrar participante"; $("pe-cancel").hidden = true; }
 async function agirP(fn, ok, pergunta) {
   if (pergunta && !confirm(pergunta)) return;
@@ -309,20 +341,53 @@ $("p-limpar").onclick = async () => {
   prazoMostrado = undefined; await desenhar();
 };
 
+/* ---------- Nova votação (somente master; a autorização real é do banco) ---------- */
+$("btn-nova").onclick = () => {
+  if (!master) return;
+  $("nv-data").value = paraInput(agora() + 7 * 864e5); $("nv-ok").checked = false; aviso2("nv-dlg-msg", ""); $("dlg-nova").showModal();
+};
+$("nv-cancel").onclick = () => $("dlg-nova").close();
+$("f-nova").onsubmit = async e => {
+  e.preventDefault(); if (!master) return;
+  const v = $("nv-data").value;
+  if (!v || !$("nv-ok").checked) return aviso2("nv-dlg-msg", "Informe o novo prazo e confirme que entende que os votos serão apagados.", true);
+  $("nv-go").disabled = true; aviso2("nv-dlg-msg", "Apagando votos e abrindo a nova votação…");
+  try {
+    const r = await store.iniciarNovaVotacao(v);
+    $("dlg-nova").close(); prazoMostrado = undefined; meu = null;
+    aviso2("nv-msg", `Nova votação iniciada. ${r && r.votos_apagados != null ? r.votos_apagados : "Os"} votos antigos foram apagados; participantes, pratos e contas foram preservados.`, false, true);
+    await desenhar();
+  } catch (err) { aviso2("nv-dlg-msg", texto(err), true); }
+  finally { $("nv-go").disabled = false; }
+};
+
 /* ---------- Início ---------- */
-async function desenhar() {
+let rodando = null, repetir = false;
+function desenhar() { // sempre devolve uma Promise; chamadas simultâneas são agrupadas (evita telas fora de ordem)
+  if (rodando) { repetir = true; return rodando; }
+  rodando = (async () => {
+    try { await atualizarDados(); } finally { rodando = null; }
+    if (repetir) { repetir = false; await desenhar(); }
+  })();
+  return rodando;
+}
+async function atualizarDados() {
   try {
     lista = await store.listar(); meu = await store.meuVoto();
-    const c = await store.config(); cfg = { offset: c.agora - Date.now(), encerraEm: c.encerraEm };
-  }
-  catch (e) { $("status").textContent = "Erro ao carregar os dados: " + texto(e); return; }
-  cartoes(); ranking(); painelAdmin().catch(e => console.warn("Painel admin:", e)); aviso();
+    const c = await store.config(); cfg = { offset: c.agora - Date.now(), encerraEm: c.encerraEm, ok: true };
+  } catch (e) { console.error("Falha ao carregar:", e); $("status").textContent = "Erro ao carregar os dados: " + texto(e); return; }
+  try { cartoes(); ranking(); painelAdmin(); aviso(); }
+  catch (e) { console.error("Falha ao exibir:", e); $("status").textContent = "Erro ao exibir os dados: " + texto(e); }
 }
 (async () => {
   try {
     store = await criarStore();
-    if (location.hash.includes("type=recovery")) $("dlg-nova-senha").showModal();
-    admin = await store.ehAdmin();
+    store.aoMudarSessao(async evento => {
+      if (evento === "PASSWORD_RECOVERY") abrirNovaSenha();
+      else if (evento === "SIGNED_OUT" || evento === "TOKEN_REFRESHED") { await papeis(); await desenhar(); }
+    });
+    if (location.hash.includes("type=recovery")) abrirNovaSenha();
+    await papeis();
     store.aoMudar(desenhar); await desenhar();
-  } catch (e) { $("status").textContent = "Não foi possível iniciar: " + texto(e); $("cards").textContent = ""; }
+  } catch (e) { console.error("Falha ao iniciar:", e); $("status").textContent = "Não foi possível iniciar: " + texto(e); $("cards").textContent = ""; }
 })();
