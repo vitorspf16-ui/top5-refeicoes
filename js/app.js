@@ -1,6 +1,5 @@
-import { CONFIG } from "./config.js";
 import { comprimir, fmt } from "./compress.js";
-import { criarStoreDemo } from "./store-demo.js";
+import { criarStore } from "./store-supabase.js";
 
 const $ = id => document.getElementById(id);
 const texto = e => (e && e.message) || String(e);
@@ -8,6 +7,21 @@ const iniciais = n => n.split(" ").slice(0, 2).map(s => s[0]).join("");
 const pct = n => n.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + "%";
 let store, lista = [], meu = null, admin = false, compactado = null, urlPrevia = null, ocupado = false, ultimos = {};
 const linhas = new Map();
+const TZ = "America/Sao_Paulo";
+let cfg = { offset: 0, encerraEm: null }, jaEncerrada = false, prazoMostrado;
+const agora = () => Date.now() + cfg.offset;
+const encerrada = () => cfg.encerraEm !== null && agora() >= cfg.encerraEm;
+const fmtData = ms => new Date(ms).toLocaleString("pt-BR", { timeZone: TZ, dateStyle: "long", timeStyle: "short" });
+const paraInput = ms => { const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(ms)).map(x => [x.type, x.value])); return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`; };
+const resta = ms => { const s = Math.max(0, Math.floor(ms / 1000)), d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h ${m}min` : h ? `${h}h ${m}min ${s % 60}s` : `${m}min ${s % 60}s`; };
+function aviso() {
+  const a = $("aviso"), e = encerrada(); a.classList.toggle("fechada", e);
+  a.textContent = e ? `Votação encerrada em ${fmtData(cfg.encerraEm)} (Brasília). Resultado final abaixo.`
+    : cfg.encerraEm ? `Votação aberta até ${fmtData(cfg.encerraEm)} (Brasília) · faltam ${resta(cfg.encerraEm - agora())}` : "Votação aberta";
+  if (e !== jaEncerrada) { jaEncerrada = e; cartoes(); ranking(); }
+}
+setInterval(aviso, 1000);
 
 /* ---------- Classificação: posição = 1 + quem tem MAIS votos; mesmo total = empate ---------- */
 function classificar(l) {
@@ -34,8 +48,11 @@ function poeFoto(el, prato) {
 /* ---------- Votação ---------- */
 function cartoes() {
   const box = $("cards");
+  const ativos = lista.filter(p => p.ativo);
+  if (!ativos.length) { box.innerHTML = '<p class="empty">Nenhum participante cadastrado.</p>'; return; }
   if (!box.querySelector(".card")) box.replaceChildren();
-  lista.forEach((p, i) => {
+  [...box.querySelectorAll(".card")].forEach(c => { if (!ativos.some(p => "card-" + p.id === c.id)) c.remove(); });
+  ativos.forEach((p, i) => {
     let c = $("card-" + p.id);
     if (!c) {
       c = document.createElement("article"); c.className = "card"; c.id = "card-" + p.id; c.style.animationDelay = i * 60 + "ms";
@@ -49,18 +66,19 @@ function cartoes() {
       box.appendChild(c);
     }
     poeFoto(c.firstChild, p.prato);
+    c.querySelector(".name").textContent = p.nome; c.querySelector(".nick").textContent = "“" + p.apelido + "”";
+    c.querySelector(".avatar").textContent = iniciais(p.nome);
     c.querySelector(".pn").textContent = p.prato ? p.prato.nome : "Prato ainda não cadastrado";
     c.querySelector(".pd").textContent = (p.prato && p.prato.descricao) || "";
     const b = c.querySelector("button");
-    c.classList.toggle("mine", meu === p.id); b.disabled = !!meu;
-    b.classList.toggle("done", meu === p.id); b.textContent = meu === p.id ? "✓ Seu voto" : "Votar";
+    c.classList.toggle("mine", meu === p.id); b.disabled = !!meu || encerrada();
+    b.classList.toggle("done", meu === p.id); b.textContent = meu === p.id ? "✓ Seu voto" : encerrada() ? "Encerrada" : "Votar";
   });
 }
 
 function ranking() {
-  const { total, itens } = classificar(lista), ol = $("ranking");
-  const sufixo = CONFIG.modo === "demo" ? " de teste" : "";
-  $("status").textContent = total ? `${total} ${total === 1 ? "voto" : "votos"}${sufixo} · ${meu ? "seu voto já foi registrado" : "você ainda não votou"}` : "Ainda não há votos.";
+  const { total, itens } = classificar(lista.filter(p => p.ativo)), ol = $("ranking");
+  $("status").textContent = total ? `${total} ${total === 1 ? "voto" : "votos"} · ${encerrada() ? "resultado final" : meu ? "seu voto já foi registrado" : "você ainda não votou"}` : "Ainda não há votos.";
   if (!total) { ol.innerHTML = '<li class="empty">Seja o primeiro a votar!</li>'; linhas.clear(); $("rank-note").textContent = ""; return; }
   if (ol.querySelector(".empty")) ol.replaceChildren();
   const vis = itens.filter(p => p.pos <= 5);
@@ -97,6 +115,7 @@ function ranking() {
 }
 
 async function votar(p) {
+  if (encerrada()) { aviso(); $("status").textContent = "Votação encerrada."; return; }
   $("status").textContent = "Registrando voto…";
   const r = await store.votar(p.id);
   await desenhar();
@@ -106,12 +125,12 @@ async function votar(p) {
 /* ---------- Administração de pratos ---------- */
 function msg(t, erro) { const m = $("f-msg"); m.textContent = t; m.className = "msg" + (erro ? " erro" : ""); }
 function setOcupado(v, rotulo) {
-  ocupado = v; $("f-salvar").disabled = v; $("f-file").disabled = v;
+  ocupado = v; $("f-salvar").disabled = v; $("f-file").disabled = v; $("f-cam").disabled = v;
   $("f-salvar").textContent = v ? rotulo : "Confirmar e salvar";
 }
 function limparFoto() {
   if (urlPrevia) URL.revokeObjectURL(urlPrevia);
-  urlPrevia = null; compactado = null; $("prev").hidden = true; $("prev-img").removeAttribute("src"); $("f-file").value = "";
+  urlPrevia = null; compactado = null; $("prev").hidden = true; $("prev-img").removeAttribute("src"); $("f-file").value = ""; $("f-cam").value = "";
 }
 function carregar() {
   const p = lista.find(x => x.id === $("f-part").value);
@@ -128,13 +147,15 @@ async function agir(fn, ok, pergunta) {
 function painelAdmin() {
   $("admin").hidden = !admin; $("btn-admin").hidden = admin; $("btn-sair").hidden = !admin;
   if (!admin) return;
-  const sel = $("f-part"), atual = sel.value;
-  if (sel.options.length !== lista.length) {
-    sel.replaceChildren(...lista.map(p => new Option(`${p.nome} (${p.apelido})`, p.id)));
-    if (atual) sel.value = atual; else carregar();
+  const sel = $("f-part"), atual = sel.value, atv = lista.filter(p => p.ativo), sig = atv.map(p => p.id + p.nome + p.apelido).join("|");
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig; sel.replaceChildren(...atv.map(p => new Option(`${p.nome} (${p.apelido})`, p.id)));
+    if (atual && atv.some(p => p.id === atual)) sel.value = atual; else carregar();
   }
+  listaPessoas();
+  if (prazoMostrado !== cfg.encerraEm) { prazoMostrado = cfg.encerraEm; $("p-data").value = cfg.encerraEm ? paraInput(cfg.encerraEm) : ""; }
   const ul = $("lista-pratos"); ul.replaceChildren();
-  const com = lista.filter(p => p.prato);
+  const com = lista.filter(p => p.ativo && p.prato);
   if (!com.length) { const li = document.createElement("li"); li.textContent = "Nenhum prato cadastrado ainda."; ul.append(li); }
   com.forEach(p => {
     const li = document.createElement("li"), f = criarFoto("thumb"); poeFoto(f, p.prato);
@@ -151,7 +172,7 @@ function painelAdmin() {
 
 $("f-part").onchange = carregar;
 $("f-limpar").onclick = () => { carregar(); msg(""); };
-$("f-file").onchange = async e => {
+const escolher = async e => {
   const file = e.target.files[0]; if (!file) return;
   limparFoto(); setOcupado(true, "Compactando…"); msg("Compactando imagem…");
   try {
@@ -159,12 +180,14 @@ $("f-file").onchange = async e => {
     compactado = r; urlPrevia = URL.createObjectURL(r.blob);
     $("prev-img").src = urlPrevia; $("prev").hidden = false;
     const d = Math.round((1 - r.tamanhoFinal / r.tamanhoOriginal) * 100);
-    $("prev-info").textContent = `Original: ${fmt(r.tamanhoOriginal)} → compactada: ${fmt(r.tamanhoFinal)} (${d >= 0 ? "−" + d : "+" + -d}%) · ${r.largura}×${r.altura} px · WebP, qualidade ${r.qualidade}` +
-      (r.acimaDoAlvo ? " · ⚠ acima de 150 KB mesmo na qualidade mínima" : "");
+    const detalheQualidade = r.qualidade == null ? "PNG (sem ajuste de qualidade)" : `${r.rotulo}, qualidade ${r.qualidade}`;
+    $("prev-info").textContent = `Original: ${fmt(r.tamanhoOriginal)} → compactada: ${fmt(r.tamanhoFinal)} (${d >= 0 ? "−" + d : "+" + -d}%) · ${r.largura}×${r.altura} px · ${detalheQualidade}` +
+      (r.acimaDoAlvo ? " · ⚠ acima de 150 KB; o servidor aceita até 300 KB" : "");
     msg("Confira a prévia e confirme para enviar.");
   } catch (err) { msg(texto(err), true); }
   finally { setOcupado(false); }
 };
+$("f-file").onchange = escolher; $("f-cam").onchange = escolher;
 $("f-prato").onsubmit = async e => {
   e.preventDefault(); if (ocupado) return;
   const part = lista.find(p => p.id === $("f-part").value), prato = part && part.prato, nome = $("f-nome").value.trim();
@@ -178,8 +201,60 @@ $("f-prato").onsubmit = async e => {
   finally { setOcupado(false); await desenhar(); }
 };
 
-$("btn-admin").onclick = async () => {
-  if (CONFIG.modo === "demo") { await store.entrar(); admin = true; return desenhar(); }
+async function atualizarListaAdmins() {
+  const ul = $("lista-admins");
+  try {
+    const admins = await store.listarAdmins();
+    ul.replaceChildren();
+    if (!admins.length) { const li = document.createElement("li"); li.textContent = "Nenhum administrador cadastrado."; ul.append(li); return; }
+    admins.forEach(a => {
+      const li = document.createElement("li"), t = document.createElement("div"); t.className = "txt";
+      const b = document.createElement("b"); b.textContent = a.nome || a.email;
+      const sub = document.createElement("div"); sub.className = "nick"; sub.textContent = `${a.email} · ${a.role === "master" ? "Master" : "Administrador"}`;
+      t.append(b, sub); li.append(t);
+      if (a.role !== "master") li.append(btn("Remover acesso", async () => {
+        if (!confirm(`Remover a permissão de administrador de ${a.email}? A conta de login também será excluída.`)) return;
+        try { await store.gerenciarAdmin("remover", { user_id: a.user_id }); aviso2("ad-msg", "Acesso removido e conta excluída."); await atualizarListaAdmins(); }
+        catch (e) { aviso2("ad-msg", texto(e), true); }
+      }, "perigo"));
+      ul.append(li);
+    });
+  } catch (e) { aviso2("ad-msg", "Não foi possível listar administradores: " + texto(e), true); }
+}
+$("f-admin").onsubmit = async e => {
+  e.preventDefault();
+  if (!master) return aviso2("ad-msg", "Apenas o administrador master pode fazer isso.", true);
+  const nome = $("ad-nome").value.trim(), email = $("ad-email").value.trim(), senha = $("ad-senha").value;
+  aviso2("ad-msg", "Criando conta…");
+  try {
+    await store.gerenciarAdmin("criar", { nome, email, senha });
+    $("ad-nome").value = ""; $("ad-email").value = ""; $("ad-senha").value = "";
+    aviso2("ad-msg", "Administrador criado. Ele poderá redefinir a senha pela tela de login.");
+    await atualizarListaAdmins();
+  } catch (e) { aviso2("ad-msg", texto(e), true); }
+};
+$("f-nova-senha").onsubmit = async e => {
+  e.preventDefault();
+  const senha = $("nova-senha").value;
+  if (senha.length < 8) { $("nova-senha-msg").textContent = "Use pelo menos 8 caracteres."; return; }
+  $("nova-senha-msg").textContent = "Salvando…";
+  try {
+    await store.atualizarSenha(senha);
+    $("nova-senha").value = "";
+    $("nova-senha-msg").textContent = "Senha alterada. Você já pode entrar com a nova senha.";
+    history.replaceState({}, document.title, location.pathname + location.search);
+    setTimeout(() => $("dlg-nova-senha").close(), 1600);
+  } catch (err) { $("nova-senha-msg").textContent = "Não foi possível alterar a senha: " + texto(err); }
+};
+$("l-reset").onclick = async () => {
+  const email = $("l-email").value.trim();
+  if (!email) { $("login-msg").textContent = "Informe seu e-mail para receber o link de redefinição."; $("l-email").focus(); return; }
+  $("login-msg").textContent = "Enviando link de redefinição…";
+  try { await store.redefinirSenha(email); $("login-msg").textContent = "Se esse e-mail estiver cadastrado, você receberá instruções para redefinir a senha."; }
+  catch (e) { $("login-msg").textContent = "Não foi possível solicitar a redefinição: " + texto(e); }
+};
+
+$("btn-admin").onclick = () => {
   $("login-msg").textContent = ""; $("dlg-login").showModal();
 };
 $("l-cancel").onclick = () => $("dlg-login").close();
@@ -190,24 +265,63 @@ $("f-login").onsubmit = async e => {
 };
 $("btn-sair").onclick = async () => { await store.sair(); admin = false; await desenhar(); };
 
-/* ---------- Ferramentas de teste (demo) ---------- */
-let timer = null;
-$("btn-sim").onclick = () => {
-  if (timer) return; let n = 0; $("btn-sim").disabled = true;
-  timer = setInterval(() => { store.simularOutros(); if (++n >= 8) { clearInterval(timer); timer = null; $("btn-sim").disabled = false; } }, 700);
+/* ---------- Administração: participantes e prazo ---------- */
+let editando = null;
+const aviso2 = (id, t, erro) => { const m = $(id); m.textContent = t; m.className = "msg" + (erro ? " erro" : ""); };
+function limparPessoa() { editando = null; $("pe-nome").value = ""; $("pe-apelido").value = ""; $("pe-salvar").textContent = "Cadastrar participante"; $("pe-cancel").hidden = true; }
+async function agirP(fn, ok, pergunta) {
+  if (pergunta && !confirm(pergunta)) return;
+  aviso2("pe-msg", "Processando…");
+  try { await fn(); aviso2("pe-msg", ok); } catch (e) { aviso2("pe-msg", texto(e), true); }
+  await desenhar();
+}
+function listaPessoas() {
+  const ul = $("lista-part"); ul.replaceChildren();
+  if (!lista.length) { const li = document.createElement("li"); li.textContent = "Nenhum participante cadastrado."; ul.append(li); return; }
+  lista.forEach(p => {
+    const li = document.createElement("li"), t = document.createElement("div"); t.className = "txt";
+    const b = document.createElement("b"); b.textContent = p.nome + (p.ativo ? "" : " (inativo)");
+    const s = document.createElement("div"); s.className = "nick"; s.textContent = `“${p.apelido}” · ${p.votos} ${p.votos === 1 ? "voto" : "votos"}`;
+    t.append(b, s); li.append(t,
+      btn("Editar", () => { editando = p.id; $("pe-nome").value = p.nome; $("pe-apelido").value = p.apelido; $("pe-salvar").textContent = "Salvar alterações"; $("pe-cancel").hidden = false; $("pe-nome").focus(); }),
+      btn(p.ativo ? "Desativar" : "Reativar", () => agirP(() => store.definirAtivo(p.id, !p.ativo), p.ativo ? "Participante desativado. Os votos foram preservados." : "Participante reativado.",
+        p.ativo ? `Desativar ${p.nome}? Ele sai da votação e do ranking, mas os votos ficam guardados.` : null)));
+    if (p.votos === 0) li.append(btn("Excluir", () => agirP(() => store.excluirParticipante(p.id), "Participante excluído.", `Excluir ${p.nome} e o prato dele? Não há votos para perder.`), "perigo"));
+    ul.append(li);
+  });
+}
+$("pe-cancel").onclick = () => { limparPessoa(); aviso2("pe-msg", ""); };
+$("f-pessoa").onsubmit = async e => {
+  e.preventDefault(); const nome = $("pe-nome").value.trim(), apelido = $("pe-apelido").value.trim();
+  if (!nome || !apelido) return aviso2("pe-msg", "Informe nome e apelido.", true);
+  try { await store.salvarParticipante({ id: editando, nome, apelido }); aviso2("pe-msg", editando ? "Participante atualizado." : "Participante cadastrado."); limparPessoa(); }
+  catch (err) { aviso2("pe-msg", texto(err), true); }
+  await desenhar();
 };
-$("btn-reset").onclick = () => { store.reiniciar(); ultimos = {}; };
+$("f-prazo").onsubmit = async e => {
+  e.preventDefault(); const v = $("p-data").value; if (!v) return aviso2("p-msg", "Escolha a data e o horário.", true);
+  try { await store.definirEncerramento(v); aviso2("p-msg", "Prazo salvo (horário de Brasília)."); } catch (err) { aviso2("p-msg", texto(err), true); }
+  prazoMostrado = undefined; await desenhar();
+};
+$("p-limpar").onclick = async () => {
+  if (!confirm("Remover o prazo? A votação ficará aberta sem data para encerrar.")) return;
+  try { await store.definirEncerramento(""); aviso2("p-msg", "Prazo removido."); } catch (err) { aviso2("p-msg", texto(err), true); }
+  prazoMostrado = undefined; await desenhar();
+};
 
 /* ---------- Início ---------- */
 async function desenhar() {
-  try { lista = await store.listar(); meu = await store.meuVoto(); }
+  try {
+    lista = await store.listar(); meu = await store.meuVoto();
+    const c = await store.config(); cfg = { offset: c.agora - Date.now(), encerraEm: c.encerraEm };
+  }
   catch (e) { $("status").textContent = "Erro ao carregar os dados: " + texto(e); return; }
-  cartoes(); ranking(); painelAdmin();
+  cartoes(); ranking(); painelAdmin().catch(e => console.warn("Painel admin:", e)); aviso();
 }
 (async () => {
   try {
-    store = CONFIG.modo === "supabase" ? await (await import("./store-supabase.js")).criarStore() : criarStoreDemo();
-    $("banner").hidden = $("tools").hidden = CONFIG.modo !== "demo";
+    store = await criarStore();
+    if (location.hash.includes("type=recovery")) $("dlg-nova-senha").showModal();
     admin = await store.ehAdmin();
     store.aoMudar(desenhar); await desenhar();
   } catch (e) { $("status").textContent = "Não foi possível iniciar: " + texto(e); $("cards").textContent = ""; }

@@ -43,9 +43,9 @@ revoke all on function public.meu_voto() from public;
 grant execute on function public.meu_voto() to authenticated;
 -- Nenhum update/delete de votos é permitido pela API.
 
--- Storage: bucket público para leitura, limite de 300 KB e só WebP
+-- Storage: bucket público para leitura, limite de 300 KB; WebP, JPEG ou PNG
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('pratos', 'pratos', true, 307200, array['image/webp']) on conflict (id) do nothing;
+values ('pratos', 'pratos', true, 307200, array['image/webp','image/jpeg','image/png']) on conflict (id) do nothing;
 create policy "admin lista fotos"    on storage.objects for select to authenticated using (bucket_id = 'pratos' and public.sou_admin());
 create policy "admin envia fotos"    on storage.objects for insert to authenticated with check (bucket_id = 'pratos' and public.sou_admin());
 create policy "admin atualiza fotos" on storage.objects for update to authenticated using (bucket_id = 'pratos' and public.sou_admin()) with check (bucket_id = 'pratos' and public.sou_admin());

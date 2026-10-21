@@ -2,15 +2,25 @@ import { CONFIG } from "./config.js";
 let sb;
 const B = () => CONFIG.BUCKET;
 const msg = e => (e && e.message) || String(e);
+const EXT = { "image/webp": "webp", "image/jpeg": "jpg", "image/png": "png" };
+function amigavel(e) { // traduz erros do Storage para algo que o administrador entenda
+  const m = msg(e), c = String((e && (e.statusCode || e.status)) || "");
+  if (/failed to fetch|networkerror|load failed|network request/i.test(m)) return "Sem conexão com o servidor. Verifique a internet e tente de novo.";
+  if (/mime|not supported|invalid_mime/i.test(m) || c === "415") return "O servidor não aceita este formato de imagem. Aplique a migração 02 no Supabase (veja o README).";
+  if (/exceeded|too large|maximum allowed size/i.test(m) || c === "413") return "A imagem passou do tamanho máximo permitido (300 KB). Tente outra foto.";
+  if (/row-level security|unauthorized|jwt|forbidden/i.test(m) || /^40[13]$/.test(c)) return "Sem permissão para enviar fotos. Saia e entre de novo como administrador.";
+  return m;
+}
 
 async function garantirSessao() { // visitantes votam com login anônimo (identifica "uma pessoa")
   const { data } = await sb.auth.getSession();
   if (!data.session) { const { error } = await sb.auth.signInAnonymously(); if (error) console.warn("Login anônimo indisponível:", error.message); }
 }
 async function subir(pratoId, blob) { // nome único: nunca sobrescreve outra foto
-  const path = `${pratoId}/${crypto.randomUUID()}.webp`;
-  const { error } = await sb.storage.from(B()).upload(path, blob, { contentType: "image/webp", cacheControl: "31536000", upsert: false });
-  if (error) throw error; return path;
+  const ext = EXT[blob.type]; if (!ext) throw new Error("Formato de imagem inesperado: " + (blob.type || "desconhecido"));
+  const path = `${pratoId}/${crypto.randomUUID()}.${ext}`; // extensão e contentType sempre iguais ao blob real
+  const { error } = await sb.storage.from(B()).upload(path, blob, { contentType: blob.type, cacheControl: "31536000", upsert: false });
+  if (error) throw new Error(amigavel(error)); return path;
 }
 async function apagar(path) {
   if (!path) return;
@@ -28,7 +38,7 @@ export async function criarStore() {
   return {
     async listar() {
       const [p, v, pr] = await Promise.all([
-        sb.from("participantes").select("id,nome,apelido").order("nome"),
+        sb.from("participantes").select("id,nome,apelido,ativo").order("nome"),
         sb.from("votos").select("participante_id"),
         sb.from("pratos").select("id,nome,descricao,foto_path,participante_id")
       ]);
@@ -50,7 +60,11 @@ export async function criarStore() {
       if (!session) return { ok: false, motivo: "Votação indisponível: ative o login anônimo no Supabase (veja o README)." };
       const { error } = await sb.from("votos").insert({ participante_id: id, voter_id: session.user.id });
       if (!error) return { ok: true };
-      return { ok: false, motivo: error.code === "23505" ? "Você já votou nesta votação." : "Não foi possível registrar o voto: " + error.message };
+      const m = msg(error);
+      return { ok: false, motivo: error.code === "23505" ? "Você já votou nesta votação."
+        : /VOTACAO_ENCERRADA|row-level security/i.test(m) ? "Votação encerrada."
+        : /PARTICIPANTE_INATIVO/.test(m) ? "Este participante não está mais na votação."
+        : "Não foi possível registrar o voto: " + m };
     },
     aoMudar(fn) {
       // Realtime apenas para pratos. A tabela votos não é publicada, pois contém registros individuais.
@@ -62,12 +76,61 @@ export async function criarStore() {
       setInterval(fn, 4000);
     },
     ehAdmin,
+    async config() { // hora do servidor + prazo (o servidor é a referência, não o relógio do aparelho)
+      const { data, error } = await sb.rpc("config_votacao"); if (error) throw error;
+      const r = Array.isArray(data) ? data[0] : data;
+      return { agora: Date.parse(r.agora), encerraEm: r.encerra_em ? Date.parse(r.encerra_em) : null };
+    },
+    async definirEncerramento(local) { // "YYYY-MM-DDTHH:MM" em America/Sao_Paulo; "" remove o prazo
+      const { error } = await sb.rpc("definir_encerramento", { p_local: local });
+      if (error) throw new Error(/Apenas administradores/.test(msg(error)) ? "Sem permissão de administrador." : msg(error));
+    },
+    async salvarParticipante({ id, nome, apelido }) {
+      const { error } = await (id ? sb.from("participantes").update({ nome, apelido }).eq("id", id) : sb.from("participantes").insert({ nome, apelido }));
+      if (error) throw error;
+    },
+    async definirAtivo(id, ativo) { const { error } = await sb.from("participantes").update({ ativo }).eq("id", id); if (error) throw error; },
+    async excluirParticipante(id) { // o banco recusa (restrict) se houver votos
+      const { data } = await sb.from("pratos").select("foto_path").eq("participante_id", id).maybeSingle();
+      const { error } = await sb.from("participantes").delete().eq("id", id);
+      if (error) throw new Error(error.code === "23503" ? "Este participante tem votos registrados. Desative-o em vez de excluir." : msg(error));
+      await apagar(data && data.foto_path);
+    },
     async entrar(email, senha) {
       const { error } = await sb.auth.signInWithPassword({ email, password: senha });
       if (error) throw new Error("E-mail ou senha inválidos.");
       if (!(await ehAdmin())) { await sb.auth.signOut(); await garantirSessao(); throw new Error("Esta conta não tem permissão de administrador."); }
     },
     async sair() { await sb.auth.signOut(); await garantirSessao(); },
+    async atualizarSenha(senha) {
+      const { error } = await sb.auth.updateUser({ password: senha });
+      if (error) throw error;
+    },
+    async redefinirSenha(email) {
+      const redirectTo = new URL("./", window.location.href).href;
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo });
+      if (error) throw error;
+    },
+    async ehMaster() {
+      const { data, error } = await sb.rpc("sou_admin_master");
+      return !error && data === true;
+    },
+    async listarAdmins() {
+      const { data, error } = await sb.rpc("listar_admins");
+      if (error) throw error;
+      return data || [];
+    },
+    async gerenciarAdmin(acao, payload) {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) throw new Error("Sua sessão expirou. Entre novamente.");
+      const { data, error } = await sb.functions.invoke("gerenciar-admins", {
+        body: { acao, ...payload },
+        headers: { Authorization: `Bearer ${session.access_token}` }
+      });
+      if (error) throw new Error(error.message || "Falha ao gerenciar administrador.");
+      if (data?.error) throw new Error(data.error);
+      return data;
+    },
 
     async salvarPrato({ pratoId, participanteId, nome, descricao, blob }) {
       let id = pratoId, antigo = null;
